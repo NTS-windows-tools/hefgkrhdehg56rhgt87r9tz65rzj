@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aukční Portál</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .bid-pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+        .timer-highlight { color: #e11d48; font-weight: 800; }
+        .empty-state { min-height: 60vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen font-sans">
+
+    <nav class="bg-white shadow-md p-4 sticky top-0 z-30">
+        <div class="max-w-6xl mx-auto flex justify-between items-center">
+            <h1 class="text-2xl font-black text-blue-600 tracking-tighter uppercase italic">SuperAukce NTS</h1>
+            <div id="user-display" class="bg-blue-100 text-blue-700 px-4 py-2 rounded-full font-bold text-sm shadow-inner"></div>
+        </div>
+    </nav>
+
+    <main class="max-w-6xl mx-auto p-4 md:p-8">
+        <div id="auction-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+            </div>
+        <div id="empty-msg" class="hidden empty-state p-8">
+            <i class="fas fa-gavel text-6xl text-gray-300 mb-4"></i>
+            <h2 class="text-2xl font-bold text-gray-600">Aktuálně tady nejsou žádné dostupné aukce.</h2>
+            <p class="text-gray-500 mt-2">Vraťte se sem prosím později. Děkujeme...</p>
+        </div>
+    </main>
+
+    <div id="detailModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl relative">
+            <button onclick="closeDetail()" class="absolute top-4 right-6 text-3xl font-bold z-10 hover:text-red-500 transition-colors">&times;</button>
+            <div id="detailContent" class="p-8 md:p-12"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, onValue, update, off, get } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDJyO5mRqwC7-7-k0i_9ioZAeHNRwQym70",
+            authDomain: "aukce-27c0f.firebaseapp.com",
+            databaseURL: "https://aukce-27c0f-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "aukce-27c0f",
+            storageBucket: "aukce-27c0f.firebasestorage.app",
+            messagingSenderId: "1024577063970",
+            appId: "1:1024577063970:web:f0a5940b784a4938ec8e7b"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        const params = new URLSearchParams(window.location.search);
+        const currentUser = params.get('user') || 'Neznámý';
+        document.getElementById('user-display').innerText = "👤 " + currentUser;
+
+        const activeIntervals = {};
+
+        function formatDate(dateStr) {
+            const d = new Date(dateStr);
+            return d.toLocaleDateString('cs-CZ') + " v " + d.toLocaleTimeString('cs-CZ', {hour: '2-digit', minute:'2-digit'});
+        }
+
+        onValue(ref(db, 'auctions'), (snapshot) => {
+            const data = snapshot.val();
+            const grid = document.getElementById('auction-grid');
+            const emptyMsg = document.getElementById('empty-msg');
+            
+            grid.innerHTML = '';
+            if(!data || Object.keys(data).length === 0) {
+                grid.classList.add('hidden');
+                emptyMsg.classList.remove('hidden');
+                return;
+            }
+            grid.classList.remove('hidden');
+            emptyMsg.classList.add('hidden');
+
+            Object.keys(data).forEach(id => {
+                const item = data[id];
+                const card = document.createElement('div');
+                card.className = "bg-white rounded-2xl shadow-lg overflow-hidden flex flex-col hover:shadow-2xl transition-shadow border border-gray-100";
+                
+                card.innerHTML = `
+                    <div class="p-6 flex-1 flex flex-col">
+                        <h3 class="text-xl font-bold mb-2 h-14 overflow-hidden text-slate-800">${item.title}</h3>
+                        <div class="mb-4">
+                            <p class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">Konec aukce:</p>
+                            <p class="text-sm font-semibold text-slate-700 mb-1">${formatDate(item.endTime)}</p>
+                            <p class="text-sm timer-highlight" id="timer-list-${id}">Načítám...</p>
+                        </div>
+                        <button onclick="openDetail('${id}')" class="mt-auto w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-blue-600 transition-colors uppercase text-sm tracking-wide">Zobrazit detail</button>
+                    </div>
+                `;
+                grid.appendChild(card);
+                setupTimer(id, item.endTime, `timer-list-${id}`);
+            });
+        });
+
+        function setupTimer(id, endTimeStr, elementId) {
+            if (activeIntervals[elementId]) clearInterval(activeIntervals[elementId]);
+
+            const updateTime = () => {
+                const el = document.getElementById(elementId);
+                if(!el) return true;
+
+                const now = new Date().getTime();
+                const end = new Date(endTimeStr).getTime();
+                const diff = end - now;
+
+                if (diff <= 0) {
+                    el.innerHTML = "🏁 Aukce skončila";
+                    el.className = "text-red-600 font-bold text-sm";
+                    
+                    const bidArea = document.getElementById('bid-area-container');
+                    if (bidArea && bidArea.getAttribute('data-id') === id && !bidArea.getAttribute('data-finished')) {
+                        bidArea.setAttribute('data-finished', 'true');
+                        openDetail(id);
+                    }
+                    return true;
+                }
+
+                const d = Math.floor(diff / 86400000);
+                const h = Math.floor((diff % 86400000) / 3600000);
+                const m = Math.floor((diff % 3600000) / 60000);
+                const s = Math.floor((diff % 60000) / 1000);
+
+                if (d >= 1) el.innerText = `⌛ Zbývá ${d} dní a ${h} hod`;
+                else if (h >= 1) el.innerText = `⌛ Zbývá ${h} hod ${m} min`;
+                else if (m >= 1) el.innerText = `⌛ Zbývá ${m} min ${s} s`;
+                else el.innerText = `🔥 Zbývá jen ${s} sekund!`;
+                
+                return false;
+            };
+
+            activeIntervals[elementId] = setInterval(() => {
+                if(updateTime()) clearInterval(activeIntervals[elementId]);
+            }, 1000);
+            updateTime();
+        }
+
+        window.openDetail = (id) => {
+            const detailRef = ref(db, `auctions/${id}`);
+            off(detailRef); 
+
+            onValue(detailRef, (snap) => {
+                const item = snap.val();
+                if(!item) { closeDetail(); return; }
+
+                const isExpired = new Date(item.endTime) < new Date();
+                
+                let logicHtml = '';
+                let statusMsg = '';
+
+                if (isExpired) {
+                    if (item.type === 'auction') {
+                        // V aukci vyhrává nejvyšší příhoz
+                        const isWinner = item.lastBidder === currentUser;
+                        statusMsg = isWinner 
+                            ? `<div class="bg-green-100 text-green-800 p-6 rounded-2xl font-bold text-center border-2 border-green-200 mb-6 animate-bounce">🏆 Gratulujeme, výhra je Vaše! Nyní vyčkejte, než Vás budeme kontaktovat!</div>`
+                            : `<div class="bg-gray-100 text-gray-500 p-6 rounded-2xl font-bold text-center italic mb-6">Litujeme, aukce již skončila a bohužel jste nevyhráli. Hodně štěstí příště! Věříme, že příště to vyjde!</div>`;
+                    } else {
+                        // V nabídce ceny vyhrává JEN pokud admin potvrdil 'accepted'
+                        const hasWonOffer = item.lastBidder === currentUser && item.offerStatus === 'accepted';
+                        statusMsg = hasWonOffer
+                            ? `<div class="bg-green-100 text-green-800 p-6 rounded-2xl font-bold text-center border-2 border-green-200 mb-6 animate-bounce">🏆 Vaše nabídka byla přijata! Výhra je Vaše. Budeme Vás kontaktovat.</div>`
+                            : `<div class="bg-red-50 text-red-700 p-6 rounded-2xl font-bold text-center border-2 border-red-100 mb-6 italic">Nabízení ceny již skončilo. Pokud vyhrajete, dáme vědět.</div>`;
+                    }
+                    logicHtml = `<div class="p-6 bg-slate-50 rounded-2xl text-center font-bold text-slate-400 uppercase tracking-widest border border-slate-200">Aukce již skončila</div>`;
+                } else if (item.type === 'auction') {
+                    const currentWinnerMsg = item.lastBidder === "" ? "" : (item.lastBidder === currentUser 
+                        ? `<p class="text-green-600 font-bold bid-pulse mb-4 text-center"><i class="fas fa-circle-check"></i> Zatím vyhráváte, Váš příhoz je zatím nejvyšší!</p>`
+                        : `<p class="text-gray-400 font-bold mb-4 text-center text-lg"><i class="fas fa-triangle-exclamation"></i> Někdo přihodil více než Vy! Zvyšte svůj příhoz!</p>`);
+                    
+                    logicHtml = `
+                        <div class="bg-slate-50 p-6 rounded-2xl border-2 border-slate-100 shadow-inner">
+                            <p class="text-xs text-gray-400 uppercase font-bold mb-1 tracking-widest text-center">Aktuální příhozy - cena:</p>
+                            <p class="text-5xl font-black text-slate-900 mb-6 text-center">${item.currentPrice} Kč</p>
+                            ${currentWinnerMsg}
+                            <div class="flex flex-col gap-4">
+                                <label class="text-sm font-bold text-slate-600">Váš nový příhoz (minimálně ${item.currentPrice + 15} Kč):</label>
+                                <input type="number" id="bid-input" class="w-full text-3xl font-bold border-2 border-slate-200 rounded-2xl px-5 py-4 outline-none focus:border-blue-500 shadow-sm">
+                                <button onclick="handleBid('${id}', ${item.currentPrice})" class="w-full bg-blue-600 text-white font-black py-5 rounded-2xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 uppercase text-lg tracking-tight">Potvrdit příhoz</button>
+                                <div class="bg-white p-4 rounded-xl border border-slate-200 mt-2"><p class="text-base text-slate-700 font-medium leading-snug"><i class="fas fa-info-circle text-blue-500 mr-2"></i>Zadejte cenu, kterou jste ochotni zaplatit, můžete ji kdykoli navýšit. Budeme se snažit, abyste nemuseli zaplatit tohle maximum.</p></div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    let offerStatusHtml = '';
+                    if (item.lastBidder === currentUser) {
+                        if (item.offerStatus === 'pending') offerStatusHtml = `<p class="text-slate-600 font-bold bg-slate-100 p-5 rounded-xl mt-4 text-center text-lg">Vaše nabídka je v pořadí pro vyhodnocení. Sledujte pravidelně tuto nabídku...</p>`;
+                        else if (item.offerStatus === 'accepted') offerStatusHtml = `<p class="text-green-700 font-bold bg-green-50 border-2 border-green-200 p-5 rounded-xl mt-4 text-center text-lg italic">Vaše nabídka je přijata! Brzy se ozveme...</p>`;
+                        else if (item.offerStatus === 'rejected') offerStatusHtml = `<p class="text-red-600 font-bold bg-red-50 border-2 border-red-100 p-5 rounded-xl mt-4 italic text-base text-center">Je nám to líto, ale Vaše nabídka nebyla dostatečná. Zkuste nabídnout znovu!</p>`;
+                    }
+
+                    logicHtml = `
+                        <div class="bg-blue-50 p-6 rounded-2xl border-2 border-blue-100">
+                            <p class="font-bold text-blue-900 mb-6 text-center text-lg">Nabídněte nám cenu, kdo nabídne nejlepší cenu, vyhraje. Cena musí být také reálná!</p>
+                            <div class="flex flex-col gap-4">
+                                <input type="number" id="offer-input" placeholder="Vaše cena v Kč" class="w-full text-2xl font-bold border-2 border-blue-200 rounded-2xl px-5 py-4 outline-none focus:border-blue-600">
+                                <button onclick="handleOffer('${id}')" class="w-full bg-blue-600 text-white font-black py-5 rounded-2xl hover:bg-blue-700 uppercase shadow-lg shadow-blue-100">Odeslat nabídku ceny</button>
+                            </div>
+                            ${offerStatusHtml}
+                        </div>
+                    `;
+                }
+
+                document.getElementById('detailContent').innerHTML = `
+                    <div class="space-y-6">
+                        <div>
+                            <div class="flex flex-wrap items-center gap-3 mb-3">
+                                <span class="bg-blue-600 text-white text-[10px] font-black px-2 py-1 rounded uppercase italic tracking-tighter">${item.status}</span>
+                                <div class="flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full">
+                                     <span class="text-slate-500 text-[11px] font-bold uppercase tracking-wider">Konec: ${formatDate(item.endTime)}</span>
+                                     <span class="timer-highlight text-xs ml-2 border-l pl-2 border-slate-300" id="timer-modal-${id}"></span>
+                                </div>
+                            </div>
+                            <h2 class="text-3xl md:text-4xl font-black leading-tight text-slate-900">${item.title}</h2>
+                        </div>
+                        <div class="bg-slate-50 p-4 rounded-xl border border-dashed border-slate-300">
+                            <span class="font-bold text-xs text-slate-400 mr-2 uppercase block mb-1">Foto produktu:</span>
+                            <a href="${item.img}" target="_blank" class="text-blue-600 underline text-sm font-bold hover:text-blue-800 break-all inline-flex items-center">
+                                <i class="fas fa-external-link-alt text-[10px] mr-2"></i> Otevřít fotografie
+                            </a>
+                        </div>
+                        <div class="prose max-w-none border-b border-slate-100 pb-6">
+                            <h4 class="text-xs font-black uppercase text-slate-400 mb-2 tracking-widest">Popis produktu</h4>
+                            <p class="text-slate-700 whitespace-pre-wrap leading-relaxed text-base md:text-lg">${item.desc}</p>
+                        </div>
+                        <div id="bid-area-container" data-id="${id}">
+                            ${statusMsg}
+                            ${logicHtml}
+                        </div>
+                    </div>
+                `;
+                document.getElementById('detailModal').classList.remove('hidden');
+                setupTimer(id, item.endTime, `timer-modal-${id}`);
+            });
+        };
+
+        window.closeDetail = () => document.getElementById('detailModal').classList.add('hidden');
+
+        window.handleBid = (id, currentPrice) => {
+            get(ref(db, `auctions/${id}/endTime`)).then((snap) => {
+                if (new Date(snap.val()) < new Date()) {
+                    alert("Tato aukce již skončila.");
+                    return;
+                }
+                const bid = Number(document.getElementById('bid-input').value);
+                if (isNaN(bid) || bid < currentPrice + 15) {
+                    alert(`Příhoz musí být alespoň ${currentPrice + 15} Kč.`);
+                    return;
+                }
+                update(ref(db, `auctions/${id}`), { currentPrice: bid, lastBidder: currentUser });
+            });
+        };
+
+        window.handleOffer = (id) => {
+            get(ref(db, `auctions/${id}/endTime`)).then((snap) => {
+                if (new Date(snap.val()) < new Date()) {
+                    alert("Nabízení ceny již skončilo.");
+                    return;
+                }
+                const val = Number(document.getElementById('offer-input').value);
+                if(isNaN(val) || val <= 0) return;
+                update(ref(db, `auctions/${id}`), { currentPrice: val, lastBidder: currentUser, offerStatus: 'pending' });
+            });
+        };
+    </script>
+</body>
+</html>
